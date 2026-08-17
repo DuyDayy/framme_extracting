@@ -25,6 +25,7 @@ BOUNDARY_ROOT = Path("/data/shot_boundaries")
 RUN_ROOT = Path("/work/runs")
 EXPECTED_VIDEOS = 216
 GPU_WORKERS = 10
+GPU_TYPE = "A10"
 CANDIDATE_CPU_WORKERS = 100
 SELECTION_CPU_WORKERS = 100
 
@@ -111,6 +112,7 @@ def prepare_run_remote(
         "video_ids": video_ids,
         "expected_videos": EXPECTED_VIDEOS,
         "gpu_workers": GPU_WORKERS,
+        "gpu_type": GPU_TYPE,
         "config": config.as_dict(),
         "config_fingerprint": config.fingerprint,
         "encoder_fingerprint": config.encoder_fingerprint,
@@ -127,6 +129,11 @@ def prepare_run_remote(
         )
         if any(existing.get(key) != manifest.get(key) for key in immutable):
             raise RuntimeError("run_id already belongs to different code/config; use a new run_id")
+        previous_gpu = existing.get("gpu_type")
+        if previous_gpu not in (None, GPU_TYPE):
+            raise RuntimeError(f"run_id already used GPU type {previous_gpu}")
+        existing["gpu_type"] = GPU_TYPE
+        existing["gpu_workers"] = GPU_WORKERS
         manifest = existing
     atomic_write_json(manifest_path, manifest)
     atomic_write_json(run / "BUDGET_PLAN.json", plan)
@@ -187,7 +194,7 @@ def build_candidates_remote(
 
 @app.cls(
     image=gpu_image,
-    gpu="T4",
+    gpu=GPU_TYPE,
     cpu=4.0,
     memory=16384,
     volumes={"/data": data_volume, "/work": work_volume, "/cache": cache_volume},
@@ -267,6 +274,7 @@ class CandidateEncoder:
             if (
                 done.get("encoder_fingerprint") == config.encoder_fingerprint
                 and done.get("config_fingerprint") == config.fingerprint
+                and done.get("gpu_type") == GPU_TYPE
                 and done.get("candidate_sha256") == sha256_file(candidate_path)
                 and done.get("vector_sha256") == sha256_file(vector_path)
                 and done.get("metadata_sha256") == sha256_file(metadata_path)
@@ -343,6 +351,7 @@ class CandidateEncoder:
             "video_id": video_id,
             "rows": len(rows),
             "image_batch_size": image_batch_size,
+            "gpu_type": GPU_TYPE,
             "encode_seconds": encode_seconds,
             "encode_fps": len(rows) / encode_seconds if encode_seconds else 0.0,
             "candidate_sha256": sha256_file(candidate_path),
@@ -519,6 +528,7 @@ def select_video_remote(
         "semantic_rejected": len(views.rejected_semantic_indices),
         "config_fingerprint": config.fingerprint,
         "encoder_fingerprint": config.encoder_fingerprint,
+        "gpu_type": run_manifest.get("gpu_type"),
         "candidate_vector_sha256": sha256_file(vector_path),
         "discovery_vector_sha256": sha256_file(output / "discovery_vectors.npy"),
         "locator_vector_sha256": sha256_file(output / "locator_vectors.npy"),
@@ -650,6 +660,7 @@ def freeze_remote(run_id: str, config_value: dict[str, Any]) -> dict[str, Any]:
         "config": config.as_dict(),
         "config_fingerprint": config.fingerprint,
         "encoder_fingerprint": config.encoder_fingerprint,
+        "gpu_type": run_manifest.get("gpu_type"),
         "frames_root": _volume_run_path(run_id, "dataset"),
         "videos": videos,
         "index": {
@@ -754,7 +765,7 @@ def main(
 
     print(
         f"[2/4] Jina encode + streaming WebP: {candidate_rows} images, "
-        f"batch={image_batch_size}, workers={GPU_WORKERS}xT4"
+        f"batch={image_batch_size}, workers={GPU_WORKERS}x{GPU_TYPE}"
     )
     encoder = CandidateEncoder()
     encoded_rows = 0
@@ -801,6 +812,7 @@ def main(
                 "index_rows": frozen["index"]["rows"],
                 "frames_root": frozen["frames_root"],
                 "gpu_workers": GPU_WORKERS,
+                "gpu_type": GPU_TYPE,
                 "image_batch_size": image_batch_size,
             },
             indent=2,

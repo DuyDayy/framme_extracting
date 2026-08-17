@@ -16,7 +16,7 @@ Jina CLIP v2 trên Modal. Pipeline không chạy lại TransNetV2 và không cò
   -> đóng băng flat index và CURRENT.json
 ```
 
-GPU encode được cấu hình ramp lên **10 container T4 đồng thời** và không vượt quá
+GPU encode được cấu hình ramp lên **10 container A10 đồng thời** và không vượt quá
 10 GPU. Mỗi video là một job; trong mỗi job ảnh được encode theo mini-batch, mặc
 định 32 ảnh. Các lệnh `sync/status` không giữ GPU chạy nền.
 
