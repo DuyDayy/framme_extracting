@@ -396,6 +396,7 @@ def select_video_remote(
 
     config = _config(config_value)
     run = RUN_ROOT / run_id
+    work_volume.reload()
     manifest = _read_manifest(run, config)
     if video_id not in manifest["video_ids"]:
         raise RuntimeError(f"{video_id} is not part of this production run")
@@ -403,7 +404,15 @@ def select_video_remote(
     candidate_path = run / "candidates" / video_id / "candidates.jsonl"
     vector_path = run / "vectors" / video_id / "candidate_vectors.npy"
     vector_done_path = run / "vectors" / video_id / "vector.done.json"
-    if not vector_done_path.exists():
+    # The GPU commits before returning, but a freshly scheduled CPU container can
+    # briefly see the previous Volume snapshot. Reload until both atomic outputs
+    # become visible instead of burning retries on an expected consistency delay.
+    for _attempt in range(30):
+        work_volume.reload()
+        if vector_path.exists() and vector_done_path.exists():
+            break
+        time.sleep(2)
+    if not vector_path.exists() or not vector_done_path.exists():
         raise RuntimeError(f"{video_id}: vector stage is incomplete")
     vector_done = json.loads(vector_done_path.read_text(encoding="utf-8"))
     if (
@@ -768,13 +777,20 @@ def main(
         f"batch={image_batch_size}, workers={GPU_WORKERS}x{GPU_TYPE}"
     )
     encoder = CandidateEncoder()
+    target_rows = {
+        item["video_id"]: int(item["target_rows"])
+        for item in plan["videos"]
+    }
+    # Longest-processing-time first keeps all ten GPUs occupied and reduces the
+    # final straggler compared with lexicographic video order.
+    encode_ids = sorted(video_ids, key=lambda value: (-target_rows[value], value))
     encoded_rows = 0
     encoded_videos = 0
     selection_calls = []
     for result in encoder.encode_video.starmap(
         (
             (video_id, run_id, config_value, image_batch_size)
-            for video_id in video_ids
+            for video_id in encode_ids
         ),
         order_outputs=False,
     ):

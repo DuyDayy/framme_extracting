@@ -55,6 +55,9 @@ trong khi các GPU còn lại tiếp tục encode. Nếu tiến trình bị ng�
 lệnh và `run-id`; checkpoint hợp lệ sẽ được bỏ qua. Nếu thay code/config, dùng
 `run-id` mới.
 
+GPU nhận video có nhiều candidate trước để giảm straggler cuối run. Job selection
+reload Modal Volume và chờ checkpoint vector atomic xuất hiện trước khi đọc.
+
 Chỉ đồng bộ boundary mà chưa chạy production:
 
 ```bash
