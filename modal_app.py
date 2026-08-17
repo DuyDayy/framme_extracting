@@ -25,8 +25,8 @@ BOUNDARY_ROOT = Path("/data/shot_boundaries")
 RUN_ROOT = Path("/work/runs")
 EXPECTED_VIDEOS = 216
 GPU_WORKERS = 10
-CANDIDATE_CPU_WORKERS = 25
-SELECTION_CPU_WORKERS = 15
+CANDIDATE_CPU_WORKERS = 100
+SELECTION_CPU_WORKERS = 100
 
 app = modal.App(APP_NAME)
 data_volume = modal.Volume.from_name(DATA_VOLUME, create_if_missing=False)
