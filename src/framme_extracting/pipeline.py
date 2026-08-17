@@ -66,8 +66,6 @@ def build_video_candidates(
 
         extras.sort(key=admission_score, reverse=True)
         rows = sorted(mandatory + extras[: target_rows - len(mandatory)], key=lambda row: row.frame_idx)
-        if len(rows) != target_rows:
-            raise RuntimeError(f"could only admit {len(rows)} of assigned {target_rows} rows")
     candidate_path = output / "candidates.jsonl"
     atomic_write_jsonl(candidate_path, (row.to_dict() for row in rows))
     checkpoint = {
@@ -82,6 +80,7 @@ def build_video_candidates(
         "decoded_rows": len(decoded),
         "candidate_rows": len(rows),
         "target_rows": target_rows,
+        "underfilled_rows": max(0, target_rows - len(rows)) if target_rows is not None else 0,
         "decode_missing": len(targets) - len(decoded),
         "probe_seconds": probe_seconds,
         "scan_seconds": scan_seconds,

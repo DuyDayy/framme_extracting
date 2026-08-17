@@ -236,7 +236,10 @@ def build_candidates_remote(
     budget = json.loads((run / "BUDGET_PLAN.json").read_text(encoding="utf-8"))
     if budget.get("config_fingerprint") != config.fingerprint:
         raise RuntimeError("budget/config fingerprint mismatch")
-    targets = {item["video_id"]: int(item["target_rows"]) for item in budget["videos"]}
+    targets = {
+        item["video_id"]: int(item.get("requested_rows", item["target_rows"]))
+        for item in budget["videos"]
+    }
 
     output = run / "candidates" / video_id
     checkpoint = output / "candidate.done.json"
@@ -262,6 +265,35 @@ def build_candidates_remote(
         raise RuntimeError(f"{video_id}: candidate decode was incomplete")
     work_volume.commit()
     return result
+
+
+@app.function(
+    image=cpu_image,
+    volumes={"/work": work_volume},
+    timeout=60 * 10,
+)
+def finalize_candidate_plan_remote(
+    run_id: str,
+    config_value: dict[str, Any],
+    candidate_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    from framme_extracting.production import reconcile_budget_plan
+    from framme_extracting.storage import atomic_write_json
+
+    config = _config(config_value)
+    run = RUN_ROOT / run_id
+    work_volume.reload()
+    _read_manifest(run, config)
+    plan_path = run / "BUDGET_PLAN.json"
+    if not plan_path.exists():
+        raise RuntimeError("missing static budget plan")
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    reconciled = reconcile_budget_plan(plan, candidate_results)
+    if reconciled["status"] != "pass":
+        raise RuntimeError(f"invalid realized budget: {reconciled['failures']}")
+    atomic_write_json(plan_path, reconciled)
+    work_volume.commit()
+    return reconciled
 
 
 @app.cls(
@@ -609,7 +641,7 @@ def select_video_remote(
         "semantic_rejected": len(views.rejected_semantic_indices),
         "config_fingerprint": config.fingerprint,
         "encoder_fingerprint": config.encoder_fingerprint,
-        "gpu_type": run_manifest.get("gpu_type"),
+        "gpu_type": manifest.get("gpu_type"),
         "candidate_vector_sha256": sha256_file(vector_path),
         "discovery_vector_sha256": sha256_file(output / "discovery_vectors.npy"),
         "locator_vector_sha256": sha256_file(output / "locator_vectors.npy"),
@@ -822,6 +854,108 @@ def _local_boundaries(
     return selected
 
 
+def _execute_production(
+    run_id: str,
+    config_value: dict[str, Any],
+    video_ids: list[str],
+    image_batch_size: int,
+) -> dict[str, Any]:
+    prepare_run_remote.remote(run_id, config_value, video_ids)
+    print(f"[1/4] candidate extraction: {len(video_ids)} videos")
+    candidate_results = list(
+        build_candidates_remote.starmap(
+            ((video_id, run_id, config_value) for video_id in video_ids),
+            order_outputs=False,
+        )
+    )
+    plan = finalize_candidate_plan_remote.remote(
+        run_id, config_value, candidate_results
+    )
+    candidate_rows = sum(int(item["candidate_rows"]) for item in candidate_results)
+    if candidate_rows != plan["assigned_rows"]:
+        raise RuntimeError(
+            f"candidate rows {candidate_rows} != realized budget {plan['assigned_rows']}"
+        )
+    print(
+        f"realized {candidate_rows}/{plan['requested_assigned_rows']} candidate rows "
+        f"({plan['underfilled_rows']} filtered after decode)"
+    )
+
+    print(
+        f"[2/4] Jina encode + streaming WebP: {candidate_rows} images, "
+        f"batch={image_batch_size}, workers={GPU_WORKERS}x{GPU_TYPE}"
+    )
+    encoder = CandidateEncoder()
+    target_rows = {
+        item["video_id"]: int(item["target_rows"])
+        for item in plan["videos"]
+    }
+    # Longest-processing-time first keeps all ten GPUs occupied and reduces the
+    # final straggler compared with lexicographic video order.
+    encode_ids = sorted(video_ids, key=lambda value: (-target_rows[value], value))
+    encoded_rows = 0
+    encoded_videos = 0
+    selection_calls = []
+    for result in encoder.encode_video.starmap(
+        (
+            (video_id, run_id, config_value, image_batch_size)
+            for video_id in encode_ids
+        ),
+        order_outputs=False,
+    ):
+        encoded_rows += int(result["rows"])
+        encoded_videos += 1
+        selection_calls.append(
+            select_video_remote.spawn(result["video_id"], run_id, config_value)
+        )
+        if encoded_videos % 10 == 0 or encoded_videos == len(video_ids):
+            print(f"encoded {encoded_videos}/{len(video_ids)} videos")
+    if encoded_rows != candidate_rows:
+        raise RuntimeError("encoded row count differs from candidate row count")
+
+    print("[3/4] wait for canonical selection and lossless WebP materialization")
+    selection_results = [call.get() for call in selection_calls]
+    if len(selection_results) != len(video_ids):
+        raise RuntimeError("selection did not return every production video")
+    image_rows = sum(int(item["images"]) for item in selection_results)
+    print(
+        f"materialized {image_rows} WebP frames under "
+        f"/runs/{run_id}/dataset/<video_id>/images"
+    )
+
+    print("[4/4] freeze flat index and CURRENT.json")
+    frozen = freeze_remote.remote(run_id, config_value)
+    if frozen["status"] != "pass":
+        raise RuntimeError(f"freeze failed: {frozen['failures'][:10]}")
+    result = {
+        "status": "pass",
+        "run_id": run_id,
+        "videos": len(frozen["videos"]),
+        "candidate_rows": candidate_rows,
+        "requested_candidate_rows": plan["requested_assigned_rows"],
+        "webp_frames": image_rows,
+        "index_rows": frozen["index"]["rows"],
+        "frames_root": frozen["frames_root"],
+        "gpu_workers": GPU_WORKERS,
+        "gpu_type": GPU_TYPE,
+        "image_batch_size": image_batch_size,
+    }
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return result
+
+
+@app.function(image=cpu_image, timeout=60 * 60 * 24)
+def run_production_remote(
+    run_id: str,
+    config_value: dict[str, Any],
+    video_ids: list[str],
+    image_batch_size: int = 32,
+) -> dict[str, Any]:
+    """Deployed coordinator; launch with Function.from_name(...).spawn()."""
+
+    return _execute_production(run_id, config_value, video_ids, image_batch_size)
+
+
 @app.local_entrypoint()
 def main(
     stage: str = "run",
@@ -876,78 +1010,4 @@ def main(
         max_vector_gib=max_vector_gib,
     )
     config_value = config.as_dict()
-    plan = prepare_run_remote.remote(run_id, config_value, video_ids)
-    print(f"[1/4] candidate extraction: {len(video_ids)} videos")
-    candidate_results = list(
-        build_candidates_remote.starmap(
-            ((video_id, run_id, config_value) for video_id in video_ids),
-            order_outputs=False,
-        )
-    )
-    candidate_rows = sum(int(item["candidate_rows"]) for item in candidate_results)
-    if candidate_rows != plan["assigned_rows"]:
-        raise RuntimeError(f"candidate rows {candidate_rows} != budget {plan['assigned_rows']}")
-
-    print(
-        f"[2/4] Jina encode + streaming WebP: {candidate_rows} images, "
-        f"batch={image_batch_size}, workers={GPU_WORKERS}x{GPU_TYPE}"
-    )
-    encoder = CandidateEncoder()
-    target_rows = {
-        item["video_id"]: int(item["target_rows"])
-        for item in plan["videos"]
-    }
-    # Longest-processing-time first keeps all ten GPUs occupied and reduces the
-    # final straggler compared with lexicographic video order.
-    encode_ids = sorted(video_ids, key=lambda value: (-target_rows[value], value))
-    encoded_rows = 0
-    encoded_videos = 0
-    selection_calls = []
-    for result in encoder.encode_video.starmap(
-        (
-            (video_id, run_id, config_value, image_batch_size)
-            for video_id in encode_ids
-        ),
-        order_outputs=False,
-    ):
-        encoded_rows += int(result["rows"])
-        encoded_videos += 1
-        selection_calls.append(
-            select_video_remote.spawn(result["video_id"], run_id, config_value)
-        )
-        if encoded_videos % 10 == 0 or encoded_videos == len(video_ids):
-            print(f"encoded {encoded_videos}/{len(video_ids)} videos")
-    if encoded_rows != candidate_rows:
-        raise RuntimeError("encoded row count differs from candidate row count")
-
-    print("[3/4] wait for canonical selection and lossless WebP materialization")
-    selection_results = [call.get() for call in selection_calls]
-    if len(selection_results) != len(video_ids):
-        raise RuntimeError("selection did not return every production video")
-    image_rows = sum(int(item["images"]) for item in selection_results)
-    print(
-        f"materialized {image_rows} WebP frames under "
-        f"/runs/{run_id}/dataset/<video_id>/images"
-    )
-
-    print("[4/4] freeze flat index and CURRENT.json")
-    frozen = freeze_remote.remote(run_id, config_value)
-    if frozen["status"] != "pass":
-        raise RuntimeError(f"freeze failed: {frozen['failures'][:10]}")
-    print(
-        json.dumps(
-            {
-                "status": "pass",
-                "run_id": run_id,
-                "videos": len(frozen["videos"]),
-                "webp_frames": image_rows,
-                "index_rows": frozen["index"]["rows"],
-                "frames_root": frozen["frames_root"],
-                "gpu_workers": GPU_WORKERS,
-                "gpu_type": GPU_TYPE,
-                "image_batch_size": image_batch_size,
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-    )
+    _execute_production(run_id, config_value, video_ids, image_batch_size)

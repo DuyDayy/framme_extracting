@@ -19,7 +19,11 @@ from framme_extracting.core import (
 from framme_extracting.evaluation import (
     temporal_window_coverage,
 )
-from framme_extracting.production import make_budget_plan, validate_vector_store
+from framme_extracting.production import (
+    make_budget_plan,
+    reconcile_budget_plan,
+    validate_vector_store,
+)
 from framme_extracting.selection import promote_vectors, search_view, select_views
 from framme_extracting.storage import atomic_save_npy, atomic_write_json
 
@@ -127,6 +131,44 @@ def test_budget_keeps_every_locator_and_assigns_exact_target(tmp_path) -> None:
     assert plan["locator_rows"] == 4
     assert plan["source_extra_rows"] == 3
     assert plan["assigned_rows"] == 7
+
+
+def test_reconciled_budget_accepts_quality_underfill_but_keeps_locators(tmp_path) -> None:
+    path = tmp_path / "L21_V001.json"
+    path.write_text(
+        json.dumps(
+            {
+                "video": {
+                    "video_id": "L21_V001",
+                    "path": "x.mp4",
+                    "width": 320,
+                    "height": 180,
+                    "fps": 25,
+                    "frame_count": 42,
+                    "duration_seconds": 1.68,
+                },
+                "shots": [
+                    {"shot_id": 1, "start_frame": 0, "end_frame": 19},
+                    {"shot_id": 2, "start_frame": 22, "end_frame": 41},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = replace(
+        PipelineConfig(), target_embedding_rows=7, max_candidate_rows=7, max_vector_gib=1
+    )
+    static = make_budget_plan([path], config)
+    realized = reconcile_budget_plan(
+        static,
+        [{"video_id": "L21_V001", "candidate_rows": 6, "decode_missing": 0}],
+    )
+    assert realized["status"] == "pass"
+    assert realized["requested_assigned_rows"] == 7
+    assert realized["assigned_rows"] == 6
+    assert realized["underfilled_rows"] == 1
+    assert realized["videos"][0]["requested_rows"] == 7
+    assert realized["videos"][0]["target_rows"] == 6
 
 
 def test_selection_gathers_byte_identical_vectors_and_keeps_locator() -> None:

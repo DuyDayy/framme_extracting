@@ -73,6 +73,71 @@ def make_budget_plan(
     }
 
 
+def reconcile_budget_plan(
+    plan: dict[str, Any], candidate_results: Iterable[dict[str, Any]]
+) -> dict[str, Any]:
+    """Freeze a static budget ceiling to the rows actually admitted after decode."""
+
+    planned = {str(item["video_id"]): dict(item) for item in plan["videos"]}
+    results: dict[str, dict[str, Any]] = {}
+    failures: list[str] = []
+    for value in candidate_results:
+        item = dict(value)
+        video_id = str(item.get("video_id", ""))
+        if not video_id:
+            failures.append("candidate result without video_id")
+        elif video_id in results:
+            failures.append(f"duplicate candidate result: {video_id}")
+        else:
+            results[video_id] = item
+
+    unexpected = sorted(set(results) - set(planned))
+    missing = sorted(set(planned) - set(results))
+    if unexpected:
+        failures.append(f"unexpected candidate videos: {unexpected[:5]}")
+    if missing:
+        failures.append(f"missing {len(missing)} candidate videos; first={missing[:5]}")
+
+    videos: list[dict[str, Any]] = []
+    for video_id in sorted(planned):
+        item = planned[video_id]
+        result = results.get(video_id)
+        requested = int(item.get("requested_rows", item["target_rows"]))
+        actual = int(result["candidate_rows"]) if result is not None else 0
+        locator_rows = int(item["locator_rows"])
+        if result is not None and int(result.get("decode_missing", 0)) != 0:
+            failures.append(f"{video_id}: candidate decode is incomplete")
+        if actual < locator_rows:
+            failures.append(f"{video_id}: admitted {actual} below {locator_rows} locators")
+        if actual > requested:
+            failures.append(f"{video_id}: admitted {actual} above ceiling {requested}")
+        videos.append(
+            {
+                **item,
+                "requested_rows": requested,
+                "target_rows": actual,
+                "underfilled_rows": max(0, requested - actual),
+            }
+        )
+
+    locator_total = sum(int(item["locator_rows"]) for item in videos)
+    requested_total = sum(int(item["requested_rows"]) for item in videos)
+    assigned_total = sum(int(item["target_rows"]) for item in videos)
+    return {
+        **plan,
+        "schema_version": "framme-budget/v3",
+        "status": "pass" if not failures else "fail",
+        "realized": True,
+        "requested_assigned_rows": requested_total,
+        "locator_rows": locator_total,
+        "source_extra_rows": assigned_total - locator_total,
+        "assigned_rows": assigned_total,
+        "underfilled_rows": requested_total - assigned_total,
+        "videos": videos,
+        "failures": failures,
+    }
+
+
 def validate_vector_store(
     candidates: list[Candidate], vectors: np.ndarray, config: PipelineConfig
 ) -> dict[str, Any]:

@@ -7,7 +7,7 @@ Jina CLIP v2 trên Modal. Pipeline không chạy lại TransNetV2 và không cò
 
 ```text
 video + shot JSON theo shard
-  -> tạo đúng ngân sách candidate đã khai báo
+  -> lập trần ngân sách candidate và giữ skeleton locator
   -> decode, quality rescue và lọc frame lỗi
   -> Jina CLIP v2 1024d fp16 theo mini-batch
   -> semantic/local dedup và canonical selection
@@ -77,12 +77,13 @@ modal run modal_app.py \
   --archive /VideoZips/Videos_L26_d.zip
 ```
 
-L26d có 72.529 locator bắt buộc và 121.904 candidate khả dụng. Chạy production:
+L26d có 72.529 locator bắt buộc; 121.904 là trần candidate trước lọc chất lượng.
+Manifest sau candidate sẽ đóng băng số frame thực thu. Chạy production:
 
 ```bash
 modal run modal_app.py \
   --stage run \
-  --run-id l26d-prod-v1 \
+  --run-id l26d-prod-v2 \
   --groups L26 \
   --video-start 300 \
   --video-end 399 \
@@ -91,6 +92,20 @@ modal run modal_app.py \
   --max-vector-gib 0.30 \
   --image-batch-size 32 \
   --boundaries /absolute/path/to/L26/shots
+```
+
+Deploy app rồi khởi chạy coordinator nền (boundary phải được sync trước):
+
+```bash
+modal deploy modal_app.py
+python launch_deployed.py \
+  --run-id l26d-prod-v2 \
+  --group L26 \
+  --video-start 300 \
+  --video-end 399 \
+  --target-embedding-rows 121904 \
+  --max-vector-gib 0.30 \
+  --image-batch-size 32
 ```
 
 Xem tiến độ:
