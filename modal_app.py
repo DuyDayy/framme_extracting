@@ -23,7 +23,6 @@ CACHE_VOLUME = "hf-cache"
 VIDEO_ROOT = Path("/data/video")
 BOUNDARY_ROOT = Path("/data/shot_boundaries")
 RUN_ROOT = Path("/work/runs")
-EXPECTED_VIDEOS = 216
 GPU_WORKERS = 10
 GPU_TYPE = "A10"
 CANDIDATE_CPU_WORKERS = 100
@@ -77,6 +76,76 @@ def _read_manifest(run: Path, config: PipelineConfig) -> dict[str, Any]:
 
 @app.function(
     image=cpu_image,
+    cpu=4.0,
+    memory=8192,
+    volumes={"/data": data_volume},
+    timeout=60 * 60 * 2,
+)
+def unpack_video_archive_remote(
+    archive_path: str, expected_group: str, expected_videos: int
+) -> dict[str, Any]:
+    import os
+    import shutil
+    import zipfile
+
+    data_volume.reload()
+    archive = Path("/data") / archive_path.lstrip("/")
+    if not archive.is_file():
+        raise RuntimeError(f"missing video archive: {archive}")
+
+    extracted = 0
+    skipped = 0
+    video_ids: list[str] = []
+    with zipfile.ZipFile(archive) as source:
+        members = sorted(
+            (
+                item
+                for item in source.infolist()
+                if not item.is_dir() and Path(item.filename).suffix.lower() == ".mp4"
+            ),
+            key=lambda item: item.filename,
+        )
+        if len(members) != expected_videos:
+            raise RuntimeError(
+                f"expected {expected_videos} MP4 files, found {len(members)}"
+            )
+        for item in members:
+            member = Path(item.filename)
+            if member.is_absolute() or ".." in member.parts:
+                raise RuntimeError(f"unsafe archive member: {item.filename}")
+            video_id = member.stem
+            if not video_id.startswith(f"{expected_group}_V"):
+                raise RuntimeError(f"unexpected video in archive: {item.filename}")
+            video_ids.append(video_id)
+            target = VIDEO_ROOT / f"{video_id}.mp4"
+            if target.is_file() and target.stat().st_size == item.file_size:
+                skipped += 1
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(".mp4.tmp")
+            with source.open(item) as input_stream, temporary.open("wb") as output_stream:
+                shutil.copyfileobj(input_stream, output_stream, length=8 * 1024 * 1024)
+            if temporary.stat().st_size != item.file_size:
+                raise RuntimeError(f"incomplete extraction: {item.filename}")
+            os.replace(temporary, target)
+            extracted += 1
+
+    if len(set(video_ids)) != expected_videos:
+        raise RuntimeError("archive contains duplicate video IDs")
+    data_volume.commit()
+    return {
+        "archive": archive_path,
+        "expected_group": expected_group,
+        "videos": len(video_ids),
+        "first_video": min(video_ids),
+        "last_video": max(video_ids),
+        "extracted": extracted,
+        "skipped": skipped,
+    }
+
+
+@app.function(
+    image=cpu_image,
     volumes={"/data": data_volume, "/work": work_volume},
     timeout=60 * 10,
 )
@@ -89,8 +158,8 @@ def prepare_run_remote(
     from framme_extracting.storage import atomic_write_json, sha256_file
 
     config = _config(config_value)
-    if len(video_ids) != EXPECTED_VIDEOS or len(set(video_ids)) != EXPECTED_VIDEOS:
-        raise RuntimeError(f"production requires exactly {EXPECTED_VIDEOS} unique videos")
+    if not video_ids or len(set(video_ids)) != len(video_ids):
+        raise RuntimeError("production requires a non-empty list of unique videos")
     paths = [BOUNDARY_ROOT / f"{video_id}.json" for video_id in video_ids]
     missing = [str(path) for path in paths if not path.exists()]
     if missing:
@@ -101,16 +170,19 @@ def prepare_run_remote(
         raise RuntimeError(f"invalid production budget: {plan['failures']}")
 
     run = RUN_ROOT / run_id
-    code_hashes = {
-        path.name: sha256_file(path)
-        for path in sorted(Path("/root/src/framme_extracting").glob("*.py"))
-    }
+    code_hashes = {"modal_app.py": sha256_file(Path(__file__))}
+    code_hashes.update(
+        {
+            path.name: sha256_file(path)
+            for path in sorted(Path("/root/src/framme_extracting").glob("*.py"))
+        }
+    )
     manifest = {
         "schema_version": "framme-production/v2",
         "run_id": run_id,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "video_ids": video_ids,
-        "expected_videos": EXPECTED_VIDEOS,
+        "expected_videos": len(video_ids),
         "gpu_workers": GPU_WORKERS,
         "gpu_type": GPU_TYPE,
         "config": config.as_dict(),
@@ -603,8 +675,9 @@ def freeze_remote(run_id: str, config_value: dict[str, Any]) -> dict[str, Any]:
     missing_ids = sorted(expected_ids - selected_ids)
     if missing_ids:
         failures.append(f"missing {len(missing_ids)} selected videos; first={missing_ids[:5]}")
-    if len(videos) != EXPECTED_VIDEOS:
-        failures.append(f"expected {EXPECTED_VIDEOS} selected videos, found {len(videos)}")
+    expected_videos = int(run_manifest["expected_videos"])
+    if len(videos) != expected_videos:
+        failures.append(f"expected {expected_videos} selected videos, found {len(videos)}")
     if failures:
         manifest = {
             "schema_version": "framme-frozen/v2",
@@ -724,9 +797,29 @@ def status_remote(run_id: str) -> dict[str, Any]:
     }
 
 
-def _local_boundaries(boundary_dir: Path, groups: str) -> list[Path]:
+def _local_boundaries(
+    boundary_dir: Path,
+    groups: str,
+    video_start: int = 0,
+    video_end: int = 0,
+) -> list[Path]:
     prefixes = tuple(f"{item.strip()}_" for item in groups.split(",") if item.strip())
-    return sorted(path for path in boundary_dir.glob("*.json") if path.stem.startswith(prefixes))
+    paths = sorted(
+        path for path in boundary_dir.glob("*.json") if path.stem.startswith(prefixes)
+    )
+    if not video_start and not video_end:
+        return paths
+    if video_start < 1 or video_end < video_start:
+        raise ValueError("video_start/video_end must define a positive inclusive range")
+    selected: list[Path] = []
+    for path in paths:
+        try:
+            ordinal = int(path.stem.rsplit("_V", 1)[1])
+        except (IndexError, ValueError) as exc:
+            raise ValueError(f"invalid video boundary name: {path.name}") from exc
+        if video_start <= ordinal <= video_end:
+            selected.append(path)
+    return selected
 
 
 @app.local_entrypoint()
@@ -734,21 +827,40 @@ def main(
     stage: str = "run",
     run_id: str = "l21-l25-prod-v1",
     groups: str = "L21,L22,L23,L24,L25",
+    expected_videos: int = 216,
+    video_start: int = 0,
+    video_end: int = 0,
+    target_embedding_rows: int = 627_000,
+    max_vector_gib: float = 1.25,
     image_batch_size: int = 32,
     boundaries: str = "",
+    archive: str = "",
 ) -> None:
     if stage == "status":
         print(json.dumps(status_remote.remote(run_id), indent=2, ensure_ascii=False))
         return
+    if stage == "unpack":
+        if not archive:
+            raise ValueError("--archive is required for unpack")
+        group_names = [item.strip() for item in groups.split(",") if item.strip()]
+        if len(group_names) != 1:
+            raise ValueError("unpack requires exactly one group")
+        result = unpack_video_archive_remote.remote(
+            archive, group_names[0], expected_videos
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
     if stage not in {"run", "sync"}:
-        raise ValueError("stage must be one of: run, sync, status")
+        raise ValueError("stage must be one of: run, sync, unpack, status")
     if not boundaries:
         raise ValueError("--boundaries is required for run/sync")
 
-    local_paths = _local_boundaries(Path(boundaries), groups)
-    if len(local_paths) != EXPECTED_VIDEOS:
+    local_paths = _local_boundaries(
+        Path(boundaries), groups, video_start=video_start, video_end=video_end
+    )
+    if len(local_paths) != expected_videos:
         raise RuntimeError(
-            f"expected {EXPECTED_VIDEOS} L21-L25 boundary files, found {len(local_paths)}"
+            f"expected {expected_videos} boundary files, found {len(local_paths)}"
         )
     video_ids = [path.stem for path in local_paths]
     with data_volume.batch_upload(force=True) as batch:
@@ -758,7 +870,11 @@ def main(
         print(json.dumps({"uploaded_boundaries": len(local_paths)}, indent=2))
         return
 
-    config = PipelineConfig()
+    config = PipelineConfig(
+        target_embedding_rows=target_embedding_rows,
+        max_candidate_rows=target_embedding_rows,
+        max_vector_gib=max_vector_gib,
+    )
     config_value = config.as_dict()
     plan = prepare_run_remote.remote(run_id, config_value, video_ids)
     print(f"[1/4] candidate extraction: {len(video_ids)} videos")

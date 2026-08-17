@@ -6,8 +6,8 @@ Jina CLIP v2 trên Modal. Pipeline không chạy lại TransNetV2 và không cò
 ## Pipeline production
 
 ```text
-216 video L21-L25 + shot JSON
-  -> tạo đúng 627.000 candidate
+video + shot JSON theo shard
+  -> tạo đúng ngân sách candidate đã khai báo
   -> decode, quality rescue và lọc frame lỗi
   -> Jina CLIP v2 1024d fp16 theo mini-batch
   -> semantic/local dedup và canonical selection
@@ -37,7 +37,7 @@ Modal cần có:
 - `aic-data-vol/video/<video_id>.mp4`;
 - `aic-framme-vol` để ghi output;
 - `hf-cache` để cache model;
-- thư mục local chứa đúng 216 file shot JSON của L21-L25.
+- thư mục local chứa shot JSON đúng với shard sẽ chạy.
 
 ## Chạy toàn bộ
 
@@ -62,6 +62,35 @@ Chỉ đồng bộ boundary mà chưa chạy production:
 
 ```bash
 modal run modal_app.py --stage sync --boundaries /absolute/path/to/shot-json
+```
+
+### Chạy shard L26d
+
+Archive `Videos_L26_d.zip` chứa 100 video `L26_V300`–`L26_V399`. Sau khi upload
+archive vào `aic-data-vol`, giải nén atomic ngay trên Volume:
+
+```bash
+modal run modal_app.py \
+  --stage unpack \
+  --groups L26 \
+  --expected-videos 100 \
+  --archive /VideoZips/Videos_L26_d.zip
+```
+
+L26d có 72.529 locator bắt buộc và 121.904 candidate khả dụng. Chạy production:
+
+```bash
+modal run modal_app.py \
+  --stage run \
+  --run-id l26d-prod-v1 \
+  --groups L26 \
+  --video-start 300 \
+  --video-end 399 \
+  --expected-videos 100 \
+  --target-embedding-rows 121904 \
+  --max-vector-gib 0.30 \
+  --image-batch-size 32 \
+  --boundaries /absolute/path/to/L26/shots
 ```
 
 Xem tiến độ:
