@@ -17,11 +17,9 @@ from framme_extracting.core import (
     seed_candidates,
 )
 from framme_extracting.evaluation import (
-    make_budget_plan,
-    require_passing_gate,
     temporal_window_coverage,
-    validate_vector_store,
 )
+from framme_extracting.production import make_budget_plan, validate_vector_store
 from framme_extracting.selection import promote_vectors, search_view, select_views
 from framme_extracting.storage import atomic_save_npy, atomic_write_json
 
@@ -155,36 +153,11 @@ def test_selection_gathers_byte_identical_vectors_and_keeps_locator() -> None:
         assert promoted[output_index].tobytes() == vectors[source_index].tobytes()
 
 
-def test_vector_validation_and_full_gate(tmp_path) -> None:
+def test_vector_integrity_validation() -> None:
     config = replace(PipelineConfig(), embedding_dim=4, search_dim=2)
     rows = [Candidate("L21_V001", 0, 1, metrics=_metrics(0))]
     vectors = np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float16)
     assert validate_vector_store(rows, vectors, config)["status"] == "pass"
-    gate = tmp_path / "gate.json"
-    gate.write_text(
-        json.dumps(
-            {
-                "status": "pass",
-                "scope": "full",
-                "expected_videos": 1,
-                "evaluated_videos": 1,
-                "config_fingerprint": config.fingerprint,
-                "encoder_fingerprint": config.encoder_fingerprint,
-                "candidate_metrics": {"rows": config.target_embedding_rows},
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert require_passing_gate(gate, config, 1)["status"] == "pass"
-    bad = json.loads(gate.read_text())
-    bad["config_fingerprint"] = "stale"
-    gate.write_text(json.dumps(bad))
-    try:
-        require_passing_gate(gate, config, 1)
-    except RuntimeError as error:
-        assert "config_fingerprint" in str(error)
-    else:
-        raise AssertionError("stale eval gate must fail")
 
 
 def test_frozen_index_files_have_the_flat_index_contract(tmp_path) -> None:

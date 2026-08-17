@@ -1,125 +1,108 @@
 # framme-extracting
 
-Pipeline dùng trực tiếp shot boundaries TransNetV2 đã có. Nó không chạy lại
-TransNetV2 và không tự nới shot để che các frame chưa được gán.
+Repo production độc lập để cắt keyframe từ shot boundaries TransNetV2 và encode
+Jina CLIP v2 trên Modal. Pipeline không chạy lại TransNetV2 và không còn stage eval.
 
-## Luồng dữ liệu
+## Pipeline production
 
 ```text
-video + shot JSON
-  -> probe và kiểm biên
-  -> 613.256 locator tối thiểu cho mọi cửa sổ 10 frame
-  -> 13.744 slot boundary/stable/change/rescue (tổng đúng 627.000)
-  -> candidate union theo (video_id, frame_idx)
-  -> lọc frame lỗi/transition, quality rescue, local dedup
-  -> Candidate Embedding Store: Jina CLIP v2, 1024d, fp16, L2 norm
-  -> discovery view + periodic localization view
-  -> materialize WebP và gather lại đúng vector đã encode
-  -> kiểm hash, manifest, freeze
+216 video L21-L25 + shot JSON
+  -> tạo đúng 627.000 candidate
+  -> decode, quality rescue và lọc frame lỗi
+  -> Jina CLIP v2 1024d fp16 theo mini-batch
+  -> semantic/local dedup và canonical selection
+  -> ghi lossless WebP + metadata
+  -> gather lại vector đã encode, không encode ảnh lần hai
+  -> đóng băng flat index và CURRENT.json
 ```
 
-Vector được định danh bằng `video_id + frame_idx + pixel_sha256 +
-encoder_fingerprint`. Final vector phải giống từng byte với hàng tương ứng trong
-Candidate Embedding Store. Search 512d phải cắt 1024d rồi normalize lại.
+GPU encode được cấu hình ramp lên **10 container T4 đồng thời** và không vượt quá
+10 GPU. Mỗi video là một job; trong mỗi job ảnh được encode theo mini-batch, mặc
+định 32 ảnh. Các lệnh `sync/status` không giữ GPU chạy nền.
 
-## Cài đặt độc lập
+## Cài đặt
 
 ```bash
-git clone <repository-url>
-cd framme_extracting
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[test,modal]'
-pytest
-```
-
-Đầu vào cần có:
-
-- Modal volume `aic-data-vol`: video ở `/video/<video_id>.mp4`;
-- một thư mục local chứa `<video_id>.json` với metadata video và `shots` từ
-  TransNetV2;
-- Modal profile có quyền đọc `aic-data-vol` và ghi `aic-framme-vol`.
-
-## Thứ tự chạy bắt buộc
-
-```bash
-# Dùng đúng Modal profile của dự án
 modal profile activate duy-nguyencse
-
-# 1. Kiểm 216 boundary JSON tại máy, chưa ghi hay chạy GPU
-modal run modal_app.py --stage preflight --boundaries /path/to/shots
-
-# 1b. Eval CPU 3 video thật; chỉ upload 3 boundary vào namespace pilot riêng
-modal run modal_app.py --stage sample-eval --run-id sample-01 --limit 3 \
-  --boundaries /path/to/shots
-
-# 2. Upload boundary; video L21-L25 đã nằm ở /video trên aic-data-vol
-modal run modal_app.py --stage sync --boundaries /path/to/shots
-
-# 3. Pilot CPU 3 video; full scan chỉ được mở nếu dự phóng thời gian đạt gate
-modal run modal_app.py --stage cpu-pilot --max-cpu-wall-hours 4 \
-  --boundaries /path/to/shots
-
-# 4. Quét CPU toàn bộ candidate và tạo báo cáo chi tiết
-modal run modal_app.py --stage candidates --boundaries /path/to/shots
-modal run modal_app.py --stage evaluate --boundaries /path/to/shots
-
-# 5. Chỉ khi eval_gate.json PASS: pilot GPU 3 video để đo FPS/chi phí thật
-modal run modal_app.py --stage pilot --max-usd 12 --boundaries /path/to/shots
-
-# 6. Chỉ khi cả eval gate và pilot gate PASS
-modal run modal_app.py --stage encode --boundaries /path/to/shots
-modal run modal_app.py --stage select --boundaries /path/to/shots
-modal run modal_app.py --stage freeze --boundaries /path/to/shots
 ```
 
-`--stage full` bị vô hiệu có chủ ý để không thể bỏ qua bước đọc báo cáo. Kết quả nằm
-trong volume `aic-framme-vol` tại `/runs/<run_id>`. Chỉ khi đủ 216 video và mọi hash
-hợp lệ, `freeze` mới cập nhật `/CURRENT.json`.
+Modal cần có:
 
-Với L21–L25 hiện tại, preflight cho 613.256 locator và 13.744 frame đa nguồn,
-tổng đúng 627.000 vector 1024d fp16 (khoảng 1,196 GiB). OCR và object cũ dùng hệ `n`
-cũ nên phải chạy lại trên metadata/ảnh mới trước khi bật hai nguồn đó; ASR có thể ánh
-xạ lại theo `frame_idx/fps` trong `metadata.csv`.
+- `aic-data-vol/video/<video_id>.mp4`;
+- `aic-framme-vol` để ghi output;
+- `hf-cache` để cache model;
+- thư mục local chứa đúng 216 file shot JSON của L21-L25.
 
-Pilot Modal ngày 2026-08-17 trên `L21_V001..003` đã PASS: 99.515 raw frame,
-9.941 candidate, không thiếu frame decode và coverage cửa sổ 10 frame bằng 100% trên
-cả ba video. Scan CPU cộng dồn 790 giây; dự phóng 13,59 CPU-giờ, khoảng 1,13 giờ lý
-tưởng với 12 container. Artifact đầy đủ: `docs/sample_eval_20260817.json`.
-
-## Eval gate kiểm gì
-
-- đúng số video, shot hợp lệ, không overlap/out-of-range;
-- giữ riêng mọi transition gap, không chọn candidate trong gap;
-- mỗi shot có locator; mọi cửa sổ 10 frame trong shot chứa ít nhất một locator (100% hình học);
-- coverage time-weighted chính xác cho cửa sổ 5/7/9/11/21 frame;
-- số candidate và dung lượng vector 1024d dự kiến không vượt cap;
-- vector đúng shape/dtype/norm, pixel hash không đổi;
-- pilot đo throughput thật và chi phí dự kiến không vượt `--max-usd`;
-- vector discovery/locator là phép gather byte-identical từ kho candidate.
-
-Chạy unit test cục bộ:
+## Chạy toàn bộ
 
 ```bash
-pytest -q
+modal run modal_app.py \
+  --stage run \
+  --run-id l21-l25-prod-v1 \
+  --image-batch-size 32 \
+  --boundaries /absolute/path/to/shot-json
 ```
 
-## Sau khi pipeline chạy xong cần encode gì?
+Một lệnh trên tự chạy bốn pha: candidate CPU, encode 10 GPU, materialize WebP và
+freeze index. Ngay khi một GPU encode xong một video, job CPU của video đó ghi WebP
+trong khi các GPU còn lại tiếp tục encode. Nếu tiến trình bị ngắt, chạy lại đúng
+lệnh và `run-id`; checkpoint hợp lệ sẽ được bỏ qua. Nếu thay code/config, dùng
+`run-id` mới.
 
-Không cần encode lại ảnh bằng Jina/CLIP. `freeze` đã tạo vector Jina 1024d cho
-canonical frames bằng cách gather nguyên byte từ Candidate Embedding Store. Search
-512d chỉ cần cắt `vector[:, :512]` rồi L2-normalize lại.
+Chỉ đồng bộ boundary mà chưa chạy production:
 
-Cần xử lý tiếp các nguồn có ID phụ thuộc bộ keyframe mới:
+```bash
+modal run modal_app.py --stage sync --boundaries /absolute/path/to/shot-json
+```
 
-- **OCR:** chạy lại trên ảnh canonical và ghi theo `(video_id, n)` mới;
-- **object detection/caption:** chạy lại vì `n` và frame đã đổi;
-- **ASR:** không cần transcribe lại nếu video không đổi; chỉ remap transcript hiện có
-  sang keyframe mới bằng `frame_idx / fps` trong `metadata.csv`;
-- **query text:** encode mỗi query bằng text tower của đúng revision Jina đã pin. Đây
-  là encode truy vấn, không phải encode lại dataset;
-- **VLM/crop rerank:** chạy lúc có query trên shortlist, không chạy offline cho toàn
-  bộ 627k frame.
+Xem tiến độ:
 
-Chỉ phải encode lại toàn bộ ảnh khi model/revision/preprocessing hoặc pixel đầu vào
-thay đổi. Đổi search từ 1024d sang 512d không cần encode lại.
+```bash
+modal run modal_app.py --stage status --run-id l21-l25-prod-v1
+```
+
+## Frame nằm ở đâu?
+
+Ảnh chỉ xuất hiện sau pha canonical selection, tại volume `aic-framme-vol`:
+
+```text
+/runs/l21-l25-prod-v1/dataset/<video_id>/images/000001.webp
+/runs/l21-l25-prod-v1/dataset/<video_id>/metadata.csv
+/runs/l21-l25-prod-v1/dataset/<video_id>/discovery_vectors.npy
+/runs/l21-l25-prod-v1/index/emb.npy
+/CURRENT.json
+```
+
+Kiểm tra trực tiếp:
+
+```bash
+modal volume ls aic-framme-vol /runs/l21-l25-prod-v1/dataset/L21_V001/images
+modal volume get aic-framme-vol \
+  /runs/l21-l25-prod-v1/dataset/L21_V001/images/000001.webp \
+  ./000001.webp
+```
+
+Lần chạy trước là `sample-eval`, vì vậy chỉ sinh report và candidate tạm; nó không
+đi đến pha canonical selection nên không có WebP trong `dataset/.../images`.
+
+## Sau khi chạy xong
+
+- Không encode lại ảnh bằng Jina: `emb.npy` đã chứa vector 1024d canonical.
+- Search 512d: lấy 512 chiều đầu rồi L2-normalize, không encode ảnh lại.
+- Chạy OCR và object detection/caption trên bộ WebP mới.
+- ASR không cần transcribe lại nếu video không đổi; chỉ remap theo `frame_idx/fps`.
+- Query text được encode lúc truy vấn bằng đúng revision Jina đã pin.
+- VLM/crop rerank chỉ chạy trên shortlist lúc truy vấn.
+
+Chỉ encode lại toàn bộ ảnh khi đổi model, revision, preprocessing hoặc pixel nguồn.
+
+## Kiểm tra cục bộ
+
+```bash
+python -m py_compile modal_app.py src/framme_extracting/*.py
+pytest -q
+modal run modal_app.py --help
+```
