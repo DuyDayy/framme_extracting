@@ -956,6 +956,86 @@ def run_production_remote(
     return _execute_production(run_id, config_value, video_ids, image_batch_size)
 
 
+@app.function(
+    image=cpu_image,
+    volumes={"/work": work_volume},
+    timeout=60 * 60 * 6,
+)
+def recover_selection_remote(run_id: str) -> dict[str, Any]:
+    """Run CPU-only selection for existing, valid vector checkpoints."""
+
+    from datetime import datetime, timezone
+
+    from framme_extracting.storage import atomic_write_json, sha256_file
+
+    run = RUN_ROOT / run_id
+    work_volume.reload()
+    manifest_path = run / "RUN_MANIFEST.json"
+    if not manifest_path.exists():
+        raise RuntimeError(f"missing production manifest for {run_id}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    config = _config(manifest["config"])
+    _read_manifest(run, config)
+
+    expected_ids = set(manifest["video_ids"])
+    vector_ids: list[str] = []
+    invalid: list[str] = []
+    for done_path in sorted((run / "vectors").glob("*/vector.done.json")):
+        video_id = done_path.parent.name
+        vector_path = done_path.parent / "candidate_vectors.npy"
+        metadata_path = done_path.parent / "vector_rows.jsonl"
+        if video_id not in expected_ids:
+            invalid.append(f"{video_id}: not in run manifest")
+            continue
+        done = json.loads(done_path.read_text(encoding="utf-8"))
+        if (
+            not vector_path.exists()
+            or not metadata_path.exists()
+            or done.get("config_fingerprint") != config.fingerprint
+            or done.get("encoder_fingerprint") != config.encoder_fingerprint
+            or done.get("vector_sha256") != sha256_file(vector_path)
+            or done.get("metadata_sha256") != sha256_file(metadata_path)
+        ):
+            invalid.append(f"{video_id}: invalid vector checkpoint")
+            continue
+        vector_ids.append(video_id)
+    if not vector_ids:
+        raise RuntimeError("no valid vector checkpoints available for selection")
+
+    print(
+        f"selection-only recovery: {len(vector_ids)}/{len(expected_ids)} encoded videos; "
+        "GPU encoder will not be called"
+    )
+    calls = {
+        video_id: select_video_remote.spawn(video_id, run_id, config.as_dict())
+        for video_id in vector_ids
+    }
+    selected: list[dict[str, Any]] = []
+    failures = list(invalid)
+    for video_id, call in calls.items():
+        try:
+            selected.append(call.get())
+        except Exception as exc:
+            failures.append(f"{video_id}: {type(exc).__name__}: {exc}")
+
+    report = {
+        "schema_version": "framme-selection-recovery/v1",
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id,
+        "mode": "selection_only",
+        "encoder_called": False,
+        "expected_videos": len(expected_ids),
+        "valid_vector_videos": len(vector_ids),
+        "selected_videos": len(selected),
+        "selected_frames": sum(int(item["images"]) for item in selected),
+        "failures": failures,
+        "status": "pass" if not failures else "partial",
+    }
+    atomic_write_json(run / "SELECTION_RECOVERY.json", report)
+    work_volume.commit()
+    return report
+
+
 @app.local_entrypoint()
 def main(
     stage: str = "run",

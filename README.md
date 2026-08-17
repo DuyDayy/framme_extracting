@@ -114,6 +114,17 @@ Xem tiến độ:
 modal run modal_app.py --stage status --run-id l21-l25-prod-v1
 ```
 
+Chạy lại selection cho các vector checkpoint đã có, không gọi GPU encoder:
+
+```bash
+modal deploy modal_app.py
+python recover_selection.py --run-id l21-l25-prod-v1
+```
+
+Kết quả recovery được ghi tại
+`/runs/l21-l25-prod-v1/SELECTION_RECOVERY.json`. Lệnh này chỉ xử lý video đã có
+`vector.done.json`; nó không tự freeze nếu toàn bộ run chưa encode xong.
+
 ## Frame nằm ở đâu?
 
 Ảnh chỉ xuất hiện sau pha canonical selection, tại volume `aic-framme-vol`:
