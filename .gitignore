@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.modal/
+dist/
+build/
+*.egg-info/
+runs/
+*.mp4
+*.webp
+*.npy

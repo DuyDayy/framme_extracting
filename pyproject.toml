@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "framme-extracting"
+version = "0.1.0"
+description = "Shot-aware, evaluation-gated keyframe extraction pipeline for AIC video retrieval"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "av==14.0.1",
+  "numpy==1.26.4",
+  "pillow==11.1.0",
+]
+
+[project.optional-dependencies]
+modal = ["modal==1.5.3"]
+test = ["pytest>=8.3,<9"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/framme_extracting"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
