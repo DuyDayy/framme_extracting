@@ -20,6 +20,10 @@ GPU encode được cấu hình ramp lên **10 container T4 đồng thời** và
 10 GPU. Mỗi video là một job; trong mỗi job ảnh được encode theo mini-batch, mặc
 định 32 ảnh. Các lệnh `sync/status` không giữ GPU chạy nền.
 
+Pha candidate dùng 25 container × 4 vCPU = 100 vCPU. Khi 10 GPU đang encode,
+canonical selection dùng tối đa 15 container × 4 vCPU; cộng với 40 vCPU của 10
+GPU container vẫn nằm trong quota 100 vCPU.
+
 ## Cài đặt
 
 ```bash

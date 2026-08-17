@@ -25,6 +25,8 @@ BOUNDARY_ROOT = Path("/data/shot_boundaries")
 RUN_ROOT = Path("/work/runs")
 EXPECTED_VIDEOS = 216
 GPU_WORKERS = 10
+CANDIDATE_CPU_WORKERS = 25
+SELECTION_CPU_WORKERS = 15
 
 app = modal.App(APP_NAME)
 data_volume = modal.Volume.from_name(DATA_VOLUME, create_if_missing=False)
@@ -139,7 +141,7 @@ def prepare_run_remote(
     volumes={"/data": data_volume, "/work": work_volume},
     timeout=60 * 60 * 4,
     retries=2,
-    max_containers=20,
+    max_containers=CANDIDATE_CPU_WORKERS,
 )
 def build_candidates_remote(
     video_id: str, run_id: str, config_value: dict[str, Any]
@@ -362,7 +364,7 @@ class CandidateEncoder:
     volumes={"/data": data_volume, "/work": work_volume},
     timeout=60 * 60 * 2,
     retries=2,
-    max_containers=20,
+    max_containers=SELECTION_CPU_WORKERS,
 )
 def select_video_remote(
     video_id: str, run_id: str, config_value: dict[str, Any]
