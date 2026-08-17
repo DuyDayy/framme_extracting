@@ -82,6 +82,11 @@ tổng đúng 627.000 vector 1024d fp16 (khoảng 1,196 GiB). OCR và object cũ
 cũ nên phải chạy lại trên metadata/ảnh mới trước khi bật hai nguồn đó; ASR có thể ánh
 xạ lại theo `frame_idx/fps` trong `metadata.csv`.
 
+Pilot Modal ngày 2026-08-17 trên `L21_V001..003` đã PASS: 99.515 raw frame,
+9.941 candidate, không thiếu frame decode và coverage cửa sổ 10 frame bằng 100% trên
+cả ba video. Scan CPU cộng dồn 790 giây; dự phóng 13,59 CPU-giờ, khoảng 1,13 giờ lý
+tưởng với 12 container. Artifact đầy đủ: `docs/sample_eval_20260817.json`.
+
 ## Eval gate kiểm gì
 
 - đúng số video, shot hợp lệ, không overlap/out-of-range;

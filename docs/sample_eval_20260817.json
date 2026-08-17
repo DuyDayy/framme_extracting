@@ -1,0 +1,69 @@
+{
+  "schema_version": "framme-sample-eval/v1",
+  "status": "pass",
+  "run_id": "sample-eval-20260817-b",
+  "modal_app_id": "ap-RgdoKIOtWOUBZrtlfJQYVj",
+  "config_fingerprint": "153c25444ed9265685db50cfc717bbc0b6a3b9072bce497a5972c37a8ef4fef5",
+  "totals": {
+    "videos": 3,
+    "shots": 872,
+    "raw_frames": 99515,
+    "candidate_rows": 9941,
+    "locator_rows": 9562,
+    "scan_seconds_sum": 790.007433896,
+    "decode_missing": 0,
+    "failures": 0
+  },
+  "projection": {
+    "full_decode_targets": 5769918,
+    "measured_aggregate_target_fps": 117.938130709,
+    "projected_cpu_hours": 13.59,
+    "projected_wall_hours_at_12_containers": 1.13
+  },
+  "videos": [
+    {
+      "video_id": "L21_V001",
+      "shots": 336,
+      "raw_frames": 37849,
+      "candidate_rows": 3778,
+      "locator_rows": 3631,
+      "scan_seconds": 249.251973262,
+      "scan_target_fps": 142.197470039,
+      "coverage_10_frames": 1.0
+    },
+    {
+      "video_id": "L21_V002",
+      "shots": 281,
+      "raw_frames": 31720,
+      "candidate_rows": 3168,
+      "locator_rows": 3046,
+      "scan_seconds": 362.29282426,
+      "scan_target_fps": 82.035850588,
+      "coverage_10_frames": 1.0
+    },
+    {
+      "video_id": "L21_V003",
+      "shots": 255,
+      "raw_frames": 29946,
+      "candidate_rows": 2995,
+      "locator_rows": 2885,
+      "scan_seconds": 178.462636374,
+      "scan_target_fps": 156.940413798,
+      "coverage_10_frames": 1.0
+    }
+  ],
+  "reason_counts": {
+    "appearance_change": 1410,
+    "boundary_end": 189,
+    "motion_change": 1769,
+    "periodic": 9562,
+    "quality_rescue": 73,
+    "short_shot": 5,
+    "stable_mid": 112,
+    "stable_q1": 143,
+    "stable_q3": 129,
+    "text_change": 1676
+  },
+  "rejection_counts": {},
+  "failures": []
+}
